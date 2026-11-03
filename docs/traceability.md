@@ -4,7 +4,7 @@ Written against *Store Management System SRS v1.0* (20 October 2026). For each r
 the test that proves it, and any exception or limitation, as Part C of the SRS asks.
 
 Run every test with `DATABASE_URL=postgres://store:store@127.0.0.1:5433/store cargo test`
-(start the database with `./scripts/dev-db.sh`). Last full run: **69 passed, 0 failed**.
+(start the database with `./scripts/dev-db.sh`). Last full run: **82 passed, 0 failed**.
 Endpoints are under `/api/v1`. Test names are `file :: test`.
 
 ## 1. Business and Store Management
@@ -58,10 +58,10 @@ Endpoints are under `/api/v1`. Test names are `file :: test`.
 | 09 Inventory consistency and concurrency | Done | fr11_stock_cannot_go_negative_even_when_requests_race, fr15_two_tills_cannot_sell_the_last_unit_twice |
 | 10 Idempotency | Done | fr15_a_retried_sale_is_not_sold_twice, fr18_a_retried_return_refunds_once, fr16_a_repeated_payment_reference_is_not_counted_twice (10 replays) |
 | 16 Password and authentication security | Done | Argon2id; lockout after 5; single-use reset tokens (m1_access :: fr04_*) |
-| 17 Staff authentication and session security | Partly | Admin idle timeout 15 minutes and revocation on deactivation/reset are done and tested. **MFA is not built.** |
+| 17 Staff authentication and session security | Done, with limits | TOTP (RFC 6238, checked against its test vectors) with recovery codes. With `REQUIRE_ADMIN_MFA` on (the default when the server runs), an owner or administrator session cannot use any admin function until MFA is enrolled and verified (m6_mfa_and_rate_limits :: nfr17_*); admin sessions idle out after 15 minutes; deactivation, password reset and MFA reset revoke sessions. Limits: the TOTP secret is stored in the database without application-level encryption (rely on database encryption at rest, NFR-15); MFA is enforced for owners and administrators, optional for other staff. |
 | 30 Currency and financial accuracy | Done for one currency | Integer minor units; documented half-up rounding (`src/money.rs`, unit tests); history never rewritten. Multi-currency is not enabled. |
 | 03 Sales processing | Done (correctness) | A failed sale leaves nothing behind (fr15_not_enough_stock_...). No load test has been run, so the timing targets are unverified. |
-| 20 API abuse protection | **Not built** | Lockout is per account only; there is no per-client rate limiting. |
+| 20 API abuse protection | Done, with limits | Per-client limits kept in the database so every instance shares them: sign-in, password reset, MFA and setup per IP address (strictest); other requests per signed-in user, writes stricter than reads, plus a per-IP ceiling. Over the limit: `429` with `Retry-After`, and the handler never runs (m6_mfa_and_rate_limits :: nfr20_*). Limits: fixed windows, so a burst at a window edge can briefly reach twice the limit; behind a proxy set `TRUST_PROXY_HEADERS` so the real client address is used; the counters cost one small database write per request. |
 | 26 Testing and API documentation | Partly | Integration tests cover success, failure, duplicates and concurrency on the critical paths. Line coverage has not been measured and there is no API reference beyond this file and the code. |
 | 01-02, 04-08, 11-15, 18-19, 21-25, 27-29 | Not addressed by this code | These cover load testing, capacity, availability, backup and recovery, encryption in transit and at rest, payment-card compliance, security scanning, the user interface, browser support, deployment, monitoring and privacy. They are deployment, interface or process work, and none of it has been done or verified here. |
 

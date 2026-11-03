@@ -52,6 +52,8 @@ pub struct Principal {
     pub user_id: Uuid,
     pub business_id: Uuid,
     pub session_id: Uuid,
+    /// This session completed a multi-factor check.
+    pub mfa_verified: bool,
     pub grants: Vec<Grant>,
 }
 

@@ -31,13 +31,14 @@ impl FromRequestParts<AppState> for Principal {
              WHERE s.token_hash = $1 AND u.id = s.user_id AND u.is_active
                AND s.revoked_at IS NULL AND s.expires_at > now()
                AND s.last_used_at + make_interval(mins => s.idle_timeout_minutes) > now()
-             RETURNING s.id AS session_id, u.id AS user_id, u.business_id",
+             RETURNING s.id AS session_id, s.mfa_verified, u.id AS user_id, u.business_id",
         )
         .bind(&hash)
         .fetch_optional(&state.pool)
         .await?
         .ok_or(ApiError::Unauthorized)?;
         let session_id: Uuid = row.get("session_id");
+        let mfa_verified: bool = row.get("mfa_verified");
         let user_id: Uuid = row.get("user_id");
         let business_id: Uuid = row.get("business_id");
 
@@ -49,7 +50,16 @@ impl FromRequestParts<AppState> for Principal {
             .iter()
             .filter_map(|r| Some(Grant { role: Role::parse(r.get::<String, _>("role").as_str())?, store_id: r.get("store_id") }))
             .collect();
-        Ok(Principal { user_id, business_id, session_id, grants })
+        let principal = Principal { user_id, business_id, session_id, mfa_verified, grants };
+
+        // NFR-17: an owner or administrator session that has not completed MFA can only enrol, verify, change
+        // its password, look at itself or sign out. Everything else is an administrative function.
+        const BEFORE_MFA: [&str; 5] = ["/api/v1/me", "/api/v1/auth/logout", "/api/v1/auth/mfa/enroll", "/api/v1/auth/mfa/confirm", "/api/v1/auth/password/change"];
+        if state.config.require_admin_mfa && principal.is_business_wide() && !principal.mfa_verified && !BEFORE_MFA.contains(&parts.uri.path()) {
+            audit::denied(&state.pool, business_id, user_id, None, "admin_function_without_mfa").await;
+            return Err(ApiError::MfaRequired);
+        }
+        Ok(principal)
     }
 }
 

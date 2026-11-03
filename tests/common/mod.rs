@@ -22,6 +22,7 @@ pub struct Api {
 pub struct Resp {
     pub status: StatusCode,
     pub body: Value,
+    pub retry_after: Option<String>,
 }
 
 impl Resp {
@@ -63,9 +64,10 @@ impl Api {
         };
         let res = self.router.clone().oneshot(req).await.unwrap();
         let status = res.status();
+        let retry_after = res.headers().get("retry-after").and_then(|v| v.to_str().ok()).map(String::from);
         let bytes = res.into_body().collect().await.unwrap().to_bytes();
         let body = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
-        Resp { status, body }
+        Resp { status, body, retry_after }
     }
 
     pub async fn get(&self, path: &str, token: &str) -> Resp {

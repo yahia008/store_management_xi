@@ -17,6 +17,10 @@ pub enum ApiError {
     NotFound(&'static str),
     #[error("{0}")]
     Conflict(String),
+    #[error("multi-factor authentication is required: enrol an authenticator app and verify a code first")]
+    MfaRequired,
+    #[error("too many requests; try again in {0} seconds")]
+    RateLimited(i64),
     #[error("internal error")]
     Internal(String),
 }
@@ -54,6 +58,8 @@ impl IntoResponse for ApiError {
             ApiError::Forbidden => (StatusCode::FORBIDDEN, "forbidden"),
             ApiError::NotFound(_) => (StatusCode::NOT_FOUND, "not_found"),
             ApiError::Conflict(_) => (StatusCode::CONFLICT, "conflict"),
+            ApiError::MfaRequired => (StatusCode::FORBIDDEN, "mfa_required"),
+            ApiError::RateLimited(_) => (StatusCode::TOO_MANY_REQUESTS, "rate_limited"),
             ApiError::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
         };
         // Never leak internals to the client; log them instead.
@@ -64,6 +70,12 @@ impl IntoResponse for ApiError {
             }
             other => other.to_string(),
         };
-        (status, Json(json!({ "error": { "code": code, "message": message } }))).into_response()
+        let mut response = (status, Json(json!({ "error": { "code": code, "message": message } }))).into_response();
+        if let ApiError::RateLimited(secs) = &self {
+            if let Ok(v) = axum::http::HeaderValue::from_str(&secs.to_string()) {
+                response.headers_mut().insert(axum::http::header::RETRY_AFTER, v);
+            }
+        }
+        response
     }
 }

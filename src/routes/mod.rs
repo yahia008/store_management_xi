@@ -8,6 +8,7 @@ mod business;
 mod catalog;
 mod customers;
 mod employees;
+mod mfa;
 mod sales;
 mod session;
 mod stock;
@@ -24,6 +25,11 @@ pub fn router() -> Router<AppState> {
         .route("/api/v1/auth/password/forgot", post(accounts::forgot))
         .route("/api/v1/auth/password/reset", post(accounts::reset))
         .route("/api/v1/auth/password/change", post(accounts::change))
+        .route("/api/v1/auth/mfa/enroll", post(mfa::enroll))
+        .route("/api/v1/auth/mfa/confirm", post(mfa::confirm))
+        .route("/api/v1/auth/mfa/verify", post(mfa::verify))
+        .route("/api/v1/auth/mfa/disable", post(mfa::disable))
+        .route("/api/v1/employees/{id}/mfa/reset", post(mfa::reset_for_employee))
         .route("/api/v1/me", get(session::me))
         .route("/api/v1/roles", get(employees::roles))
         // FR-01, FR-03: business profile and settings.

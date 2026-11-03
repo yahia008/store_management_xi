@@ -18,7 +18,7 @@ async fn main() {
     let notifier = Arc::new(LogNotifier { print_token: config.dev_print_reset_tokens });
     let listener = tokio::net::TcpListener::bind(&bind).await.expect("cannot bind");
     tracing::info!("listening on {bind}");
-    axum::serve(listener, app(pool, config, notifier)).with_graceful_shutdown(shutdown()).await.expect("server error");
+    axum::serve(listener, app(pool, config, notifier).into_make_service_with_connect_info::<std::net::SocketAddr>()).with_graceful_shutdown(shutdown()).await.expect("server error");
 }
 
 async fn shutdown() {
