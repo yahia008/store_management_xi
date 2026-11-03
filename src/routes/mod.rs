@@ -1,10 +1,11 @@
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, patch, post};
 use axum::Router;
 
 use crate::state::AppState;
 
 mod accounts;
 mod business;
+mod catalog;
 mod employees;
 mod session;
 mod stores;
@@ -30,6 +31,14 @@ pub fn router() -> Router<AppState> {
         .route("/api/v1/stores", get(stores::list).post(stores::create))
         .route("/api/v1/stores/{id}", get(stores::get).patch(stores::update))
         .route("/api/v1/stores/{id}/settings", get(stores::get_settings).put(stores::put_settings))
+        // FR-07 to FR-09: catalogue and prices.
+        .route("/api/v1/categories", get(catalog::list_categories).post(catalog::create_category))
+        .route("/api/v1/categories/{id}", patch(catalog::update_category))
+        .route("/api/v1/products", get(catalog::list_products).post(catalog::create_product))
+        .route("/api/v1/products/{id}", get(catalog::get_product).patch(catalog::update_product))
+        .route("/api/v1/products/{id}/variants", post(catalog::add_variant))
+        .route("/api/v1/variants/{id}", patch(catalog::update_variant))
+        .route("/api/v1/variants/{id}/prices", get(catalog::price_history).post(catalog::set_price))
         // FR-04, FR-05: employees and roles.
         .route("/api/v1/employees", get(employees::list).post(employees::create))
         .route("/api/v1/employees/{id}", get(employees::get).patch(employees::update))
