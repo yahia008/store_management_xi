@@ -59,7 +59,14 @@ pub fn router() -> Router<AppState> {
         // FR-15 to FR-18: sales, receipts and returns.
         .route("/api/v1/stores/{store}/sales", get(sales::list_sales).post(sales::create_sale))
         .route("/api/v1/sales/{id}", get(sales::get_sale))
+        .route("/api/v1/stores/{store}/sales/quote", post(sales::quote))
+        .route("/api/v1/stores/{store}/reports/payment-reconciliation", get(sales::reconciliation))
         .route("/api/v1/sales/{id}/receipt", get(sales::receipt))
+        .route("/api/v1/sales/{id}/receipt/print", post(sales::print_receipt))
+        .route("/api/v1/sales/{id}/payments", post(sales::add_payment))
+        .route("/api/v1/sales/{id}/payments/{pid}/confirm", post(sales::confirm_payment))
+        .route("/api/v1/sales/{id}/payments/{pid}/fail", post(sales::fail_payment))
+        .route("/api/v1/sales/{id}/payments/{pid}/reverse", post(sales::reverse_payment))
         .route("/api/v1/sales/{id}/returns", post(sales::create_return))
         // FR-19: customers.
         .route("/api/v1/customers", get(customers::list).post(customers::create))

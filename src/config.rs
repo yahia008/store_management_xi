@@ -12,6 +12,8 @@ pub struct Config {
     /// Returns after this many days, or refunds above the limit, need a store manager (FR-17).
     pub return_window_days: i64,
     pub return_manager_limit_minor: i64,
+    /// A cashier may discount a line by up to this many basis points (1000 = 10%); more needs a manager (FR-15, FR-29).
+    pub cashier_max_discount_bps: i64,
 }
 
 impl Default for Config {
@@ -26,6 +28,7 @@ impl Default for Config {
             dev_print_reset_tokens: false,
             return_window_days: 30,
             return_manager_limit_minor: 5_000_000,
+            cashier_max_discount_bps: 1_000,
         }
     }
 }
@@ -47,6 +50,7 @@ impl Config {
             dev_print_reset_tokens: var("DEV_PRINT_RESET_TOKENS", d.dev_print_reset_tokens),
             return_window_days: var("RETURN_WINDOW_DAYS", d.return_window_days),
             return_manager_limit_minor: var("RETURN_MANAGER_LIMIT_MINOR", d.return_manager_limit_minor),
+            cashier_max_discount_bps: var("CASHIER_MAX_DISCOUNT_BPS", d.cashier_max_discount_bps),
         }
     }
 }

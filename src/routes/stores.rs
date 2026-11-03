@@ -36,10 +36,19 @@ fn clean(s: Option<String>) -> Option<String> {
     s.map(|v| v.trim().to_string()).filter(|v| !v.is_empty())
 }
 
-pub async fn list(State(state): State<AppState>, p: Principal) -> ApiResult<Json<Vec<Store>>> {
+#[derive(Deserialize)]
+pub struct StoreSearch {
+    q: Option<String>,
+}
+
+/// Lists the stores the caller may see; `?q=` matches part of the name or the exact store identifier.
+pub async fn list(State(state): State<AppState>, p: Principal, axum::extract::Query(s): axum::extract::Query<StoreSearch>) -> ApiResult<Json<Vec<Store>>> {
+    let like = s.q.as_deref().map(str::trim).filter(|v| !v.is_empty()).map(|v| format!("%{}%", v.replace('%', "\\%").replace('_', "\\_")));
+    let exact = s.q.as_deref().map(str::trim).filter(|v| !v.is_empty()).map(str::to_string);
+    let filter = "AND ($3::text IS NULL OR name ILIKE $3 OR id::text = $4)";
     let stores = match p.visible_store_ids() {
-        None => sqlx::query_as::<_, Store>(&format!("SELECT {COLS} FROM stores WHERE business_id = $1 ORDER BY name")).bind(p.business_id).fetch_all(&state.pool).await?,
-        Some(ids) => sqlx::query_as::<_, Store>(&format!("SELECT {COLS} FROM stores WHERE business_id = $1 AND id = ANY($2) ORDER BY name")).bind(p.business_id).bind(ids).fetch_all(&state.pool).await?,
+        None => sqlx::query_as::<_, Store>(&format!("SELECT {COLS} FROM stores WHERE business_id = $1 AND ($2::uuid[] IS NULL OR id = ANY($2)) {filter} ORDER BY name")).bind(p.business_id).bind(None::<Vec<Uuid>>).bind(&like).bind(&exact).fetch_all(&state.pool).await?,
+        Some(ids) => sqlx::query_as::<_, Store>(&format!("SELECT {COLS} FROM stores WHERE business_id = $1 AND ($2::uuid[] IS NULL OR id = ANY($2)) {filter} ORDER BY name")).bind(p.business_id).bind(Some(ids)).bind(&like).bind(&exact).fetch_all(&state.pool).await?,
     };
     Ok(Json(stores))
 }

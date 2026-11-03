@@ -54,6 +54,17 @@ impl FromRequestParts<AppState> for Principal {
 }
 
 impl Principal {
+    /// A deactivated store takes no new stock movements (FR-02); only owners and administrators, for
+    /// explicitly administrative work, may still act on it.
+    pub async fn require_active_store(&self, state: &AppState, store_id: Uuid) -> ApiResult<()> {
+        let active: bool = sqlx::query_scalar("SELECT status = 'active' FROM stores WHERE id = $1").bind(store_id).fetch_one(&state.pool).await?;
+        if active || self.is_business_wide() {
+            Ok(())
+        } else {
+            Err(ApiError::conflict("this store is deactivated"))
+        }
+    }
+
     /// Owner or administrator only.
     pub async fn require_business_admin(&self, state: &AppState, action: &str) -> ApiResult<()> {
         if self.is_business_wide() {

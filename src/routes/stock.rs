@@ -28,26 +28,49 @@ const TODAY: &str = "(now() AT TIME ZONE (SELECT timezone FROM business_settings
 #[derive(Deserialize)]
 pub struct BalanceQuery {
     low: Option<bool>,
+    /// Matches part of the product name, brand or SKU.
+    q: Option<String>,
+    category_id: Option<Uuid>,
+    /// `in_stock`, `out_of_stock` or `low`.
+    status: Option<String>,
 }
 
+/// Stock for one store, filterable by product, SKU, category and stock status (FR-10, FR-13).
+/// `available` is what can actually be sold: sellable stock minus batches that have already expired.
 pub async fn balances(State(state): State<AppState>, p: Principal, Path(store): Path<Uuid>, Query(q): Query<BalanceQuery>) -> ApiResult<Json<Value>> {
     p.authorize_store(&state, store, &READ, "view_stock").await?;
+    if q.status.as_deref().is_some_and(|s| !["in_stock", "out_of_stock", "low"].contains(&s)) {
+        return Err(ApiError::bad("status must be in_stock, out_of_stock or low"));
+    }
+    let like = q.q.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(|s| format!("%{}%", s.replace('%', "\\%").replace('_', "\\_")));
+    let want_low = q.low == Some(true) || q.status.as_deref() == Some("low");
     let rows = sqlx::query(
-        "SELECT b.variant_id, v.sku, pr.name AS product_name, b.on_hand, b.damaged, b.expired, b.reorder_level,
-                (b.reorder_level IS NOT NULL AND b.on_hand <= b.reorder_level) AS low
+        "SELECT b.variant_id, v.sku, pr.name AS product_name, pr.category_id, b.on_hand, b.damaged, b.expired, b.reorder_level,
+                (b.reorder_level IS NOT NULL AND b.on_hand <= b.reorder_level) AS low,
+                b.on_hand - COALESCE((SELECT sum(x.quantity) FROM stock_batches x WHERE x.store_id = b.store_id AND x.variant_id = b.variant_id AND x.quantity > 0
+                     AND x.expiry_date < (now() AT TIME ZONE (SELECT timezone FROM business_settings WHERE business_id = b.business_id))::date), 0)::bigint AS available
          FROM stock_balances b JOIN product_variants v ON v.id = b.variant_id JOIN products pr ON pr.id = v.product_id
-         WHERE b.store_id = $1 AND ($2::bool IS NOT TRUE OR (b.reorder_level IS NOT NULL AND b.on_hand <= b.reorder_level))
+         WHERE b.store_id = $1
+           AND ($2::bool IS NOT TRUE OR (b.reorder_level IS NOT NULL AND b.on_hand <= b.reorder_level))
+           AND ($3::text IS NULL OR pr.name ILIKE $3 OR pr.brand ILIKE $3 OR v.sku ILIKE $3)
+           AND ($4::uuid IS NULL OR pr.category_id = $4)
+           AND ($5::text IS NULL OR ($5 = 'in_stock' AND b.on_hand > 0) OR ($5 = 'out_of_stock' AND b.on_hand = 0) OR $5 = 'low')
          ORDER BY lower(pr.name), v.sku",
     )
     .bind(store)
-    .bind(q.low)
+    .bind(want_low)
+    .bind(like)
+    .bind(q.category_id)
+    .bind(q.status)
     .fetch_all(&state.pool)
     .await?;
     let items: Vec<Value> = rows
         .iter()
         .map(|r| json!({
             "variant_id": r.get::<Uuid, _>("variant_id"), "sku": r.get::<String, _>("sku"), "product_name": r.get::<String, _>("product_name"),
-            "on_hand": r.get::<i64, _>("on_hand"), "damaged": r.get::<i64, _>("damaged"), "expired": r.get::<i64, _>("expired"),
+            "category_id": r.get::<Option<Uuid>, _>("category_id"),
+            "on_hand": r.get::<i64, _>("on_hand"), "available": r.get::<i64, _>("available"), "reserved": 0,
+            "damaged": r.get::<i64, _>("damaged"), "expired": r.get::<i64, _>("expired"),
             "reorder_level": r.get::<Option<i64>, _>("reorder_level"), "low": r.get::<bool, _>("low"),
         }))
         .collect();
@@ -94,6 +117,7 @@ pub struct Receipt {
 
 pub async fn receive(State(state): State<AppState>, p: Principal, Path(store): Path<Uuid>, Json(b): Json<Receipt>) -> ApiResult<(StatusCode, Json<Value>)> {
     p.authorize_store(&state, store, &STAFF, "receive_stock").await?;
+    p.require_active_store(&state, store).await?;
     if b.lines.is_empty() || b.lines.len() > 200 {
         return Err(ApiError::bad("a receipt needs between 1 and 200 lines"));
     }
@@ -148,6 +172,7 @@ pub struct Adjustment {
     reason: String,
     source: String,
     status: String,
+    reference: Option<String>,
     requested_by: Uuid,
     decided_by: Option<Uuid>,
     decided_at: Option<DateTime<Utc>>,
@@ -156,7 +181,7 @@ pub struct Adjustment {
     created_at: DateTime<Utc>,
 }
 
-const ADJ_COLS: &str = "id, store_id, variant_id, batch_id, kind, quantity, reason, source, status, requested_by, decided_by, decided_at, decision_note, auto_approved, created_at";
+const ADJ_COLS: &str = "id, store_id, variant_id, batch_id, kind, quantity, reason, source, status, reference, requested_by, decided_by, decided_at, decision_note, auto_approved, created_at";
 
 struct AdjInput {
     variant_id: Uuid,
@@ -164,6 +189,7 @@ struct AdjInput {
     kind: String,
     quantity: i64,
     reason: String,
+    reference: Option<String>,
     source: &'static str,
 }
 
@@ -221,8 +247,8 @@ async fn submit_adjustment(db: &mut PgConnection, p: &Principal, store: Uuid, a:
     let threshold: i64 = sqlx::query_scalar("SELECT COALESCE((SELECT adjustment_approval_threshold FROM store_stock_settings WHERE store_id = $1), 50)").bind(store).fetch_one(&mut *db).await?;
     let needs_approval = a.quantity > threshold;
     let adj = sqlx::query_as::<_, Adjustment>(&format!(
-        "INSERT INTO stock_adjustments (business_id, store_id, variant_id, batch_id, kind, quantity, reason, source, status, requested_by, auto_approved)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING {ADJ_COLS}"
+        "INSERT INTO stock_adjustments (business_id, store_id, variant_id, batch_id, kind, quantity, reason, source, status, requested_by, auto_approved, reference)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING {ADJ_COLS}"
     ))
     .bind(p.business_id)
     .bind(store)
@@ -235,6 +261,7 @@ async fn submit_adjustment(db: &mut PgConnection, p: &Principal, store: Uuid, a:
     .bind(if needs_approval { "pending" } else { "approved" })
     .bind(p.user_id)
     .bind(!needs_approval)
+    .bind(a.reference.as_deref().map(str::trim).filter(|r| !r.is_empty()))
     .fetch_one(&mut *db)
     .await?;
     if !needs_approval {
@@ -252,12 +279,15 @@ pub struct AdjustBody {
     kind: String,
     quantity: i64,
     reason: String,
+    /// Supporting reference, such as an incident or delivery-note number.
+    reference: Option<String>,
 }
 
 pub async fn adjust(State(state): State<AppState>, p: Principal, Path(store): Path<Uuid>, Json(b): Json<AdjustBody>) -> ApiResult<(StatusCode, Json<Adjustment>)> {
     p.authorize_store(&state, store, &STAFF, "adjust_stock").await?;
+    p.require_active_store(&state, store).await?;
     let mut tx = state.pool.begin().await?;
-    let adj = submit_adjustment(&mut tx, &p, store, AdjInput { variant_id: b.variant_id, batch_id: b.batch_id, kind: b.kind, quantity: b.quantity, reason: b.reason, source: "manual" }).await?;
+    let adj = submit_adjustment(&mut tx, &p, store, AdjInput { variant_id: b.variant_id, batch_id: b.batch_id, kind: b.kind, quantity: b.quantity, reason: b.reason, reference: b.reference, source: "manual" }).await?;
     tx.commit().await?;
     // 201 when applied now, 202 when it is waiting for approval.
     let status = if adj.status == "pending" { StatusCode::ACCEPTED } else { StatusCode::CREATED };
@@ -287,6 +317,9 @@ pub struct Decision {
 
 async fn decide(state: &AppState, p: &Principal, store: Uuid, id: Uuid, approve: bool, note: Option<String>) -> ApiResult<Adjustment> {
     p.authorize_store(state, store, &APPROVE, if approve { "approve_adjustment" } else { "reject_adjustment" }).await?;
+    if approve {
+        p.require_active_store(state, store).await?;
+    }
     let mut tx = state.pool.begin().await?;
     let adj = sqlx::query_as::<_, Adjustment>(&format!("SELECT {ADJ_COLS} FROM stock_adjustments WHERE id = $1 AND store_id = $2 FOR UPDATE"))
         .bind(id)
@@ -345,6 +378,7 @@ pub struct CountBody {
 /// so a sale during the count cannot make the correction wrong.
 pub async fn count(State(state): State<AppState>, p: Principal, Path(store): Path<Uuid>, Json(b): Json<CountBody>) -> ApiResult<(StatusCode, Json<Value>)> {
     p.authorize_store(&state, store, &STAFF, "count_stock").await?;
+    p.require_active_store(&state, store).await?;
     if b.lines.is_empty() || b.lines.len() > 500 || b.lines.iter().any(|l| l.counted < 0) {
         return Err(ApiError::bad("a count needs 1 to 500 lines with non-negative quantities"));
     }
@@ -372,7 +406,7 @@ pub async fn count(State(state): State<AppState>, p: Principal, Path(store): Pat
             None
         } else {
             let kind = if variance > 0 { "increase" } else { "decrease" };
-            Some(submit_adjustment(&mut tx, &p, store, AdjInput { variant_id: l.variant_id, batch_id: l.batch_id, kind: kind.into(), quantity: variance.abs(), reason: format!("stock count {count_id}"), source: "count" }).await?)
+            Some(submit_adjustment(&mut tx, &p, store, AdjInput { variant_id: l.variant_id, batch_id: l.batch_id, kind: kind.into(), quantity: variance.abs(), reason: format!("stock count {count_id}"), reference: Some(count_id.to_string()), source: "count" }).await?)
         };
         sqlx::query("INSERT INTO stock_count_lines (count_id, variant_id, batch_id, system_qty, counted_qty, variance, adjustment_id) VALUES ($1,$2,$3,$4,$5,$6,$7)")
             .bind(count_id).bind(l.variant_id).bind(l.batch_id).bind(system).bind(l.counted).bind(variance).bind(adj.as_ref().map(|a| a.id))
@@ -393,6 +427,10 @@ pub struct ExpiringQuery {
 
 pub async fn expiring(State(state): State<AppState>, p: Principal, Path(store): Path<Uuid>, Query(q): Query<ExpiringQuery>) -> ApiResult<Json<Value>> {
     p.authorize_store(&state, store, &STAFF, "view_expiring_stock").await?;
+    let days: i32 = match q.days {
+        Some(d) => d.clamp(0, 3650),
+        None => sqlx::query_scalar("SELECT COALESCE((SELECT expiry_warning_days FROM store_stock_settings WHERE store_id = $1), 30)").bind(store).fetch_one(&state.pool).await?,
+    };
     let rows = sqlx::query(&format!(
         "SELECT b.id, b.variant_id, v.sku, b.batch_code, b.expiry_date, b.quantity, (b.expiry_date < {TODAY}) AS expired
          FROM stock_batches b JOIN product_variants v ON v.id = b.variant_id
@@ -401,20 +439,21 @@ pub async fn expiring(State(state): State<AppState>, p: Principal, Path(store): 
     ))
     .bind(p.business_id)
     .bind(store)
-    .bind(q.days.unwrap_or(30).clamp(0, 3650))
+    .bind(days)
     .fetch_all(&state.pool)
     .await?;
     let items: Vec<Value> = rows.iter().map(|r| json!({
         "batch_id": r.get::<Uuid, _>("id"), "variant_id": r.get::<Uuid, _>("variant_id"), "sku": r.get::<String, _>("sku"), "batch_code": r.get::<String, _>("batch_code"),
         "expiry_date": r.get::<Option<NaiveDate>, _>("expiry_date"), "quantity": r.get::<i64, _>("quantity"), "expired": r.get::<bool, _>("expired"),
     })).collect();
-    Ok(Json(json!({ "items": items })))
+    Ok(Json(json!({ "warning_days": days, "items": items })))
 }
 
 /// Moves whatever is left of expired batches out of sellable stock into the expired bucket. Safe to run
 /// repeatedly (for instance from a nightly job): a batch already moved has nothing left to move.
 pub async fn expire_sweep(State(state): State<AppState>, p: Principal, Path(store): Path<Uuid>) -> ApiResult<Json<Value>> {
     p.authorize_store(&state, store, &STAFF, "expire_stock").await?;
+    p.require_active_store(&state, store).await?;
     let mut tx = state.pool.begin().await?;
     let rows = sqlx::query(&format!(
         "SELECT id, variant_id, quantity FROM stock_batches WHERE store_id = $2 AND quantity > 0 AND expiry_date < {TODAY} ORDER BY expiry_date, id FOR UPDATE"
@@ -522,31 +561,39 @@ pub async fn set_reorder_level(State(state): State<AppState>, p: Principal, Path
 
 pub async fn get_settings(State(state): State<AppState>, p: Principal, Path(store): Path<Uuid>) -> ApiResult<Json<Value>> {
     p.authorize_store(&state, store, &READ, "view_stock_settings").await?;
-    let t: i64 = sqlx::query_scalar("SELECT COALESCE((SELECT adjustment_approval_threshold FROM store_stock_settings WHERE store_id = $1), 50)").bind(store).fetch_one(&state.pool).await?;
-    Ok(Json(json!({ "adjustment_approval_threshold": t })))
+    let r = sqlx::query("SELECT COALESCE((SELECT adjustment_approval_threshold FROM store_stock_settings WHERE store_id = $1), 50) AS t, COALESCE((SELECT expiry_warning_days FROM store_stock_settings WHERE store_id = $1), 30) AS d")
+        .bind(store)
+        .fetch_one(&state.pool)
+        .await?;
+    Ok(Json(json!({ "adjustment_approval_threshold": r.get::<i64, _>("t"), "expiry_warning_days": r.get::<i32, _>("d") })))
 }
 
 #[derive(Deserialize)]
 pub struct StockSettings {
-    adjustment_approval_threshold: i64,
+    adjustment_approval_threshold: Option<i64>,
+    expiry_warning_days: Option<i32>,
 }
 
 pub async fn put_settings(State(state): State<AppState>, p: Principal, Path(store): Path<Uuid>, Json(b): Json<StockSettings>) -> ApiResult<Json<Value>> {
     p.authorize_store(&state, store, &APPROVE, "update_stock_settings").await?;
-    if b.adjustment_approval_threshold < 0 {
-        return Err(ApiError::bad("the threshold cannot be negative"));
+    if b.adjustment_approval_threshold.is_some_and(|t| t < 0) || b.expiry_warning_days.is_some_and(|d| !(0..=3650).contains(&d)) {
+        return Err(ApiError::bad("the threshold cannot be negative and the warning period must be 0 to 3650 days"));
     }
     let mut tx = state.pool.begin().await?;
-    sqlx::query(
-        "INSERT INTO store_stock_settings (store_id, adjustment_approval_threshold, updated_by) VALUES ($1,$2,$3)
-         ON CONFLICT (store_id) DO UPDATE SET adjustment_approval_threshold = EXCLUDED.adjustment_approval_threshold, updated_at = now(), updated_by = EXCLUDED.updated_by",
+    let r = sqlx::query(
+        "INSERT INTO store_stock_settings (store_id, adjustment_approval_threshold, expiry_warning_days, updated_by) VALUES ($1, COALESCE($2, 50), COALESCE($3, 30), $4)
+         ON CONFLICT (store_id) DO UPDATE SET adjustment_approval_threshold = COALESCE($2, store_stock_settings.adjustment_approval_threshold),
+             expiry_warning_days = COALESCE($3, store_stock_settings.expiry_warning_days), updated_at = now(), updated_by = $4
+         RETURNING adjustment_approval_threshold AS t, expiry_warning_days AS d",
     )
     .bind(store)
     .bind(b.adjustment_approval_threshold)
+    .bind(b.expiry_warning_days)
     .bind(p.user_id)
-    .execute(&mut *tx)
+    .fetch_one(&mut *tx)
     .await?;
-    audit::record(&mut *tx, Entry { business_id: Some(p.business_id), store_id: Some(store), actor: Some(p.user_id), action: "update_stock_settings", entity_type: "store", entity_id: Some(store.to_string()), after: Some(json!({ "adjustment_approval_threshold": b.adjustment_approval_threshold })), ..Default::default() }).await?;
+    let out = json!({ "adjustment_approval_threshold": r.get::<i64, _>("t"), "expiry_warning_days": r.get::<i32, _>("d") });
+    audit::record(&mut *tx, Entry { business_id: Some(p.business_id), store_id: Some(store), actor: Some(p.user_id), action: "update_stock_settings", entity_type: "store", entity_id: Some(store.to_string()), after: Some(out.clone()), ..Default::default() }).await?;
     tx.commit().await?;
-    Ok(Json(json!({ "adjustment_approval_threshold": b.adjustment_approval_threshold })))
+    Ok(Json(out))
 }

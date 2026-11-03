@@ -142,6 +142,10 @@ pub struct Product {
     tax_exempt: bool,
     tracks_expiry: bool,
     status: String,
+    brand: Option<String>,
+    image_url: Option<String>,
+    attributes: Value,
+    returnable: bool,
 }
 
 #[derive(Serialize, FromRow)]
@@ -159,7 +163,7 @@ pub struct Variant {
     price_minor: Option<i64>,
 }
 
-const PRODUCT_COLS: &str = "id, category_id, name, description, unit, tax_exempt, tracks_expiry, status";
+const PRODUCT_COLS: &str = "id, category_id, name, description, unit, tax_exempt, tracks_expiry, status, brand, image_url, attributes, returnable";
 
 /// Variant columns with the effective price resolved for an optional store (`$2`).
 const VARIANT_SELECT: &str = "SELECT v.id, v.product_id, v.sku, v.barcode, v.name, v.attributes, v.cost_minor, v.status,
@@ -215,7 +219,7 @@ pub async fn list_products(State(state): State<AppState>, p: Principal, Query(q)
     let status = if q.include_archived == Some(true) && p.is_business_wide() { None } else { Some("active") };
     let filter = "pr.business_id = $1 AND ($2::text IS NULL OR pr.status = $2)
         AND ($3::uuid IS NULL OR pr.category_id = $3)
-        AND ($4::text IS NULL OR pr.name ILIKE $4 OR EXISTS (SELECT 1 FROM product_variants v WHERE v.product_id = pr.id AND (v.sku ILIKE $4 OR v.barcode ILIKE $4)))
+        AND ($4::text IS NULL OR pr.name ILIKE $4 OR pr.brand ILIKE $4 OR EXISTS (SELECT 1 FROM product_variants v WHERE v.product_id = pr.id AND (v.sku ILIKE $4 OR v.barcode ILIKE $4)))
         AND ($5::text IS NULL OR EXISTS (SELECT 1 FROM product_variants v WHERE v.product_id = pr.id AND v.barcode = $5))";
     let total: i64 = sqlx::query_scalar(&format!("SELECT count(*) FROM products pr WHERE {filter}"))
         .bind(p.business_id)
@@ -276,6 +280,10 @@ pub struct CreateProduct {
     unit: Option<String>,
     tax_exempt: Option<bool>,
     tracks_expiry: Option<bool>,
+    brand: Option<String>,
+    image_url: Option<String>,
+    attributes: Option<Value>,
+    returnable: Option<bool>,
     variants: Vec<NewVariant>,
 }
 
@@ -325,13 +333,16 @@ pub async fn create_product(State(state): State<AppState>, p: Principal, Json(b)
         return Err(ApiError::bad("a product needs at least one variant (give a SKU and a price)"));
     }
     b.variants.iter().try_for_each(check_variant)?;
+    if b.attributes.as_ref().is_some_and(|a| !a.is_object()) {
+        return Err(ApiError::bad("attributes must be an object such as {\"origin\": \"Kebbi\"}"));
+    }
     let mut tx = state.pool.begin().await?;
     if let Some(c) = b.category_id {
         category_in_business(&mut tx, p.business_id, c).await?;
     }
     let product = sqlx::query_as::<_, Product>(&format!(
-        "INSERT INTO products (business_id, category_id, name, description, unit, tax_exempt, tracks_expiry, created_by)
-         VALUES ($1,$2,$3,$4,COALESCE($5,'each'),$6,$7,$8) RETURNING {PRODUCT_COLS}"
+        "INSERT INTO products (business_id, category_id, name, description, unit, tax_exempt, tracks_expiry, created_by, brand, image_url, attributes, returnable)
+         VALUES ($1,$2,$3,$4,COALESCE($5,'each'),$6,$7,$8,$9,$10,$11,$12) RETURNING {PRODUCT_COLS}"
     ))
     .bind(p.business_id)
     .bind(b.category_id)
@@ -341,6 +352,10 @@ pub async fn create_product(State(state): State<AppState>, p: Principal, Json(b)
     .bind(b.tax_exempt.unwrap_or(false))
     .bind(b.tracks_expiry.unwrap_or(false))
     .bind(p.user_id)
+    .bind(clean(b.brand))
+    .bind(clean(b.image_url))
+    .bind(b.attributes.unwrap_or_else(|| json!({})))
+    .bind(b.returnable.unwrap_or(true))
     .fetch_one(&mut *tx)
     .await?;
     for v in &b.variants {
@@ -361,6 +376,10 @@ pub struct UpdateProduct {
     tax_exempt: Option<bool>,
     tracks_expiry: Option<bool>,
     status: Option<String>,
+    brand: Option<String>,
+    image_url: Option<String>,
+    attributes: Option<Value>,
+    returnable: Option<bool>,
 }
 
 pub async fn update_product(State(state): State<AppState>, p: Principal, Path(id): Path<Uuid>, Json(b): Json<UpdateProduct>) -> ApiResult<Json<Value>> {
@@ -370,6 +389,9 @@ pub async fn update_product(State(state): State<AppState>, p: Principal, Path(id
     }
     if b.status.as_deref().is_some_and(|s| s != "active" && s != "archived") {
         return Err(ApiError::bad("status must be active or archived"));
+    }
+    if b.attributes.as_ref().is_some_and(|a| !a.is_object()) {
+        return Err(ApiError::bad("attributes must be an object"));
     }
     let mut tx = state.pool.begin().await?;
     if let Some(c) = b.category_id {
@@ -384,7 +406,8 @@ pub async fn update_product(State(state): State<AppState>, p: Principal, Path(id
     let after = sqlx::query_as::<_, Product>(&format!(
         "UPDATE products SET name = COALESCE($2,name), description = COALESCE($3,description), category_id = COALESCE($4,category_id),
              unit = COALESCE($5,unit), tax_exempt = COALESCE($6,tax_exempt), tracks_expiry = COALESCE($7,tracks_expiry),
-             status = COALESCE($8,status), updated_at = now() WHERE id = $1 RETURNING {PRODUCT_COLS}"
+             status = COALESCE($8,status), brand = COALESCE($9,brand), image_url = COALESCE($10,image_url), attributes = COALESCE($11,attributes),
+             returnable = COALESCE($12,returnable), updated_at = now() WHERE id = $1 RETURNING {PRODUCT_COLS}"
     ))
     .bind(id)
     .bind(clean(b.name))
@@ -394,6 +417,10 @@ pub async fn update_product(State(state): State<AppState>, p: Principal, Path(id
     .bind(b.tax_exempt)
     .bind(b.tracks_expiry)
     .bind(b.status)
+    .bind(clean(b.brand))
+    .bind(clean(b.image_url))
+    .bind(b.attributes)
+    .bind(b.returnable)
     .fetch_one(&mut *tx)
     .await?;
     let action = if before.status != after.status { if after.status == "archived" { "archive_product" } else { "restore_product" } } else { "update_product" };
@@ -476,6 +503,7 @@ pub struct PriceRow {
     id: Uuid,
     store_id: Option<Uuid>,
     price_minor: i64,
+    previous_price_minor: Option<i64>,
     effective_from: DateTime<Utc>,
     created_by: Option<Uuid>,
     created_at: DateTime<Utc>,
@@ -505,7 +533,7 @@ pub async fn price_history(State(state): State<AppState>, p: Principal, Path(id)
         }
     }
     let rows = sqlx::query_as::<_, PriceRow>(
-        "SELECT id, store_id, price_minor, effective_from, created_by, created_at FROM variant_prices
+        "SELECT id, store_id, price_minor, previous_price_minor, effective_from, created_by, created_at FROM variant_prices
          WHERE variant_id = $1 AND ($2::uuid IS NULL OR store_id = $2 OR store_id IS NULL) ORDER BY effective_from DESC, created_at DESC",
     )
     .bind(id)
@@ -540,9 +568,15 @@ pub async fn set_price(State(state): State<AppState>, p: Principal, Path(id): Pa
     }
     let mut tx = state.pool.begin().await?;
     variant_exists(&mut tx, &p, id).await?;
+    // The price this one replaces: the store's own current price, else the business price in force.
+    let current = "SELECT price_minor FROM variant_prices WHERE variant_id = $1 AND store_id IS NOT DISTINCT FROM $2 AND effective_from <= now() ORDER BY effective_from DESC, created_at DESC LIMIT 1";
+    let mut previous: Option<i64> = sqlx::query_scalar(current).bind(id).bind(b.store_id).fetch_optional(&mut *tx).await?;
+    if previous.is_none() && b.store_id.is_some() {
+        previous = sqlx::query_scalar(current).bind(id).bind(None::<Uuid>).fetch_optional(&mut *tx).await?;
+    }
     let row = sqlx::query_as::<_, PriceRow>(
-        "INSERT INTO variant_prices (business_id, variant_id, store_id, price_minor, effective_from, created_by) VALUES ($1,$2,$3,$4,$5,$6)
-         RETURNING id, store_id, price_minor, effective_from, created_by, created_at",
+        "INSERT INTO variant_prices (business_id, variant_id, store_id, price_minor, effective_from, created_by, previous_price_minor) VALUES ($1,$2,$3,$4,$5,$6,$7)
+         RETURNING id, store_id, price_minor, previous_price_minor, effective_from, created_by, created_at",
     )
     .bind(p.business_id)
     .bind(id)
@@ -550,6 +584,7 @@ pub async fn set_price(State(state): State<AppState>, p: Principal, Path(id): Pa
     .bind(b.price_minor)
     .bind(from)
     .bind(p.user_id)
+    .bind(previous)
     .fetch_one(&mut *tx)
     .await?;
     audit::record(&mut *tx, Entry { business_id: Some(p.business_id), store_id: b.store_id, actor: Some(p.user_id), action: "set_price", entity_type: "variant", entity_id: Some(id.to_string()), after: audit::json(&row), ..Default::default() }).await?;
