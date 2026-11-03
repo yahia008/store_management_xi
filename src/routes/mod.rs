@@ -1,4 +1,4 @@
-use axum::routing::{delete, get, patch, post};
+use axum::routing::{delete, get, patch, post, put};
 use axum::Router;
 
 use crate::state::AppState;
@@ -8,6 +8,7 @@ mod business;
 mod catalog;
 mod employees;
 mod session;
+mod stock;
 mod stores;
 
 pub fn router() -> Router<AppState> {
@@ -39,6 +40,20 @@ pub fn router() -> Router<AppState> {
         .route("/api/v1/products/{id}/variants", post(catalog::add_variant))
         .route("/api/v1/variants/{id}", patch(catalog::update_variant))
         .route("/api/v1/variants/{id}/prices", get(catalog::price_history).post(catalog::set_price))
+        // FR-10 to FR-14: stock.
+        .route("/api/v1/stores/{store}/stock", get(stock::balances))
+        .route("/api/v1/stores/{store}/stock/{variant}", get(stock::balance))
+        .route("/api/v1/stores/{store}/stock/receipts", post(stock::receive))
+        .route("/api/v1/stores/{store}/stock/adjustments", get(stock::list_adjustments).post(stock::adjust))
+        .route("/api/v1/stores/{store}/stock/adjustments/{id}/approve", post(stock::approve))
+        .route("/api/v1/stores/{store}/stock/adjustments/{id}/reject", post(stock::reject))
+        .route("/api/v1/stores/{store}/stock/counts", post(stock::count))
+        .route("/api/v1/stores/{store}/stock/expiring", get(stock::expiring))
+        .route("/api/v1/stores/{store}/stock/expire", post(stock::expire_sweep))
+        .route("/api/v1/stores/{store}/stock/movements", get(stock::movements))
+        .route("/api/v1/stores/{store}/stock/alerts", get(stock::alerts))
+        .route("/api/v1/stores/{store}/stock/settings", get(stock::get_settings).put(stock::put_settings))
+        .route("/api/v1/stores/{store}/stock/reorder-levels/{variant}", put(stock::set_reorder_level))
         // FR-04, FR-05: employees and roles.
         .route("/api/v1/employees", get(employees::list).post(employees::create))
         .route("/api/v1/employees/{id}", get(employees::get).patch(employees::update))

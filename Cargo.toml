@@ -26,6 +26,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
 http-body-util = "0.1"
+futures = "0.3"
 tower = { version = "0.5", features = ["util"] }
 
 # Password hashing is deliberately slow; keep it fast enough in debug builds for tests.
