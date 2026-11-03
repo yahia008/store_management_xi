@@ -41,7 +41,19 @@ impl Api {
     }
 
     pub async fn call(&self, method: Method, path: &str, token: Option<&str>, body: Option<Value>) -> Resp {
+        self.call_h(method, path, token, body, &[]).await
+    }
+
+    /// POST with an Idempotency-Key header (sales and returns).
+    pub async fn post_idem(&self, path: &str, token: &str, key: &str, body: Value) -> Resp {
+        self.call_h(Method::POST, path, Some(token), Some(body), &[("idempotency-key", key)]).await
+    }
+
+    pub async fn call_h(&self, method: Method, path: &str, token: Option<&str>, body: Option<Value>, headers: &[(&str, &str)]) -> Resp {
         let mut req = Request::builder().method(method).uri(path);
+        for (k, v) in headers {
+            req = req.header(*k, *v);
+        }
         if let Some(t) = token {
             req = req.header(header::AUTHORIZATION, format!("Bearer {t}"));
         }

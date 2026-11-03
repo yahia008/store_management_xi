@@ -9,6 +9,9 @@ pub struct Config {
     pub lockout_minutes: i64,
     pub reset_token_ttl_minutes: i64,
     pub dev_print_reset_tokens: bool,
+    /// Returns after this many days, or refunds above the limit, need a store manager (FR-17).
+    pub return_window_days: i64,
+    pub return_manager_limit_minor: i64,
 }
 
 impl Default for Config {
@@ -21,6 +24,8 @@ impl Default for Config {
             lockout_minutes: 15,
             reset_token_ttl_minutes: 30,
             dev_print_reset_tokens: false,
+            return_window_days: 30,
+            return_manager_limit_minor: 5_000_000,
         }
     }
 }
@@ -40,6 +45,8 @@ impl Config {
             lockout_minutes: var("LOCKOUT_MINUTES", d.lockout_minutes),
             reset_token_ttl_minutes: var("RESET_TOKEN_TTL_MINUTES", d.reset_token_ttl_minutes),
             dev_print_reset_tokens: var("DEV_PRINT_RESET_TOKENS", d.dev_print_reset_tokens),
+            return_window_days: var("RETURN_WINDOW_DAYS", d.return_window_days),
+            return_manager_limit_minor: var("RETURN_MANAGER_LIMIT_MINOR", d.return_manager_limit_minor),
         }
     }
 }

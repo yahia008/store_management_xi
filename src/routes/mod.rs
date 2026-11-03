@@ -6,7 +6,9 @@ use crate::state::AppState;
 mod accounts;
 mod business;
 mod catalog;
+mod customers;
 mod employees;
+mod sales;
 mod session;
 mod stock;
 mod stores;
@@ -54,6 +56,15 @@ pub fn router() -> Router<AppState> {
         .route("/api/v1/stores/{store}/stock/alerts", get(stock::alerts))
         .route("/api/v1/stores/{store}/stock/settings", get(stock::get_settings).put(stock::put_settings))
         .route("/api/v1/stores/{store}/stock/reorder-levels/{variant}", put(stock::set_reorder_level))
+        // FR-15 to FR-18: sales, receipts and returns.
+        .route("/api/v1/stores/{store}/sales", get(sales::list_sales).post(sales::create_sale))
+        .route("/api/v1/sales/{id}", get(sales::get_sale))
+        .route("/api/v1/sales/{id}/receipt", get(sales::receipt))
+        .route("/api/v1/sales/{id}/returns", post(sales::create_return))
+        // FR-19: customers.
+        .route("/api/v1/customers", get(customers::list).post(customers::create))
+        .route("/api/v1/customers/{id}", get(customers::get).patch(customers::update))
+        .route("/api/v1/customers/{id}/sales", get(customers::history))
         // FR-04, FR-05: employees and roles.
         .route("/api/v1/employees", get(employees::list).post(employees::create))
         .route("/api/v1/employees/{id}", get(employees::get).patch(employees::update))

@@ -69,6 +69,11 @@ impl Principal {
         self.is_business_wide() || self.grants.iter().any(|g| g.store_id == Some(store_id) && roles.contains(&g.role))
     }
 
+    /// True if the user holds any of `roles` at any store (business-wide roles count).
+    pub fn has_any_role(&self, roles: &[Role]) -> bool {
+        self.is_business_wide() || self.grants.iter().any(|g| roles.contains(&g.role))
+    }
+
     /// Stores the user can see at all.
     pub fn visible_store_ids(&self) -> Option<Vec<Uuid>> {
         if self.is_business_wide() {
